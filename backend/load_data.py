@@ -1,33 +1,40 @@
+import os
 import pandas as pd
-from models import db, DistributionCenter, InventoryItem, OrderItem, Order, Product, User
-from app import create_app
+from sqlalchemy import create_engine
 from datetime import datetime
 
-def parse_datetime(val):
-    return pd.to_datetime(val) if not pd.isna(val) else None
+# 1) Where to find your CSVs
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 
-def load_csv_to_db(session, model, csv_path, column_map=None):
-    df = pd.read_csv(csv_path)
-    if column_map:
-        df = df.rename(columns=column_map)
-    records = df.to_dict(orient='records')
-    for rec in records:
-        # parse any datetime-like fields
-        for k, v in rec.items():
-            if any(tok in k for tok in ('at', 'created', 'shipped', 'delivered', 'returned')):
-                rec[k] = parse_datetime(v)
-        session.add(model(**rec))
-    session.commit()
+# 2) Path for your SQLite database (it will be created next to this script)
+DB_PATH = os.path.join(os.path.dirname(__file__), "ecommerce.db")
+engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
-if __name__ == '__main__':
-    app = create_app()
-    with app.app_context():
-        session = db.session
-        base = './data'
-        load_csv_to_db(session, DistributionCenter, f'{base}/distribution_centers.csv')
-        load_csv_to_db(session, Product,             f'{base}/products.csv')
-        load_csv_to_db(session, InventoryItem,       f'{base}/inventory_items.csv')
-        load_csv_to_db(session, Order,               f'{base}/orders.csv')
-        load_csv_to_db(session, OrderItem,           f'{base}/order_items.csv')
-        load_csv_to_db(session, User,                f'{base}/users.csv')
-        print("Data loaded successfully.")
+# 3) Helper to parse dates in any column containing these tokens
+def parse_datetimes(df):
+    for col in df.columns:
+        if any(tok in col for tok in ("created", "shipped", "delivered", "returned", "at")):
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+# 4) Map of table names → CSV filenames
+TABLES = {
+    "distribution_centers": "distribution_centers.csv",
+    "inventory_items":      "inventory_items.csv",
+    "order_items":          "order_items.csv",
+    "orders":               "orders.csv",
+    "products":             "products.csv",
+    "users":                "users.csv",
+}
+
+if __name__ == "__main__":
+    # Drop & re-create each table from its CSV
+    for table, fname in TABLES.items():
+        path = os.path.join(DATA_DIR, fname)
+        print(f"Loading {path} into table `{table}`…")
+        df = pd.read_csv(path)
+        df = parse_datetimes(df)
+        df.to_sql(table, engine, if_exists="replace", index=False)
+        print(f"  → {len(df)} rows written to `{table}`")
+
+    print("All CSVs loaded into SQLite:", DB_PATH)
