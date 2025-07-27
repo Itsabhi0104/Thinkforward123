@@ -2,92 +2,111 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
 import os
+import requests
+import re
 
 app = Flask(__name__)
 CORS(app)
 
-# ✅ Load CSVs
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-
-products_df = pd.read_csv(os.path.join(DATA_DIR, "products.csv"))
+products_df    = pd.read_csv(os.path.join(DATA_DIR, "products.csv"))
 order_items_df = pd.read_csv(os.path.join(DATA_DIR, "order_items.csv"))
-inventory_df = pd.read_csv(os.path.join(DATA_DIR, "inventory_items.csv"))
+orders_df      = pd.read_csv(os.path.join(DATA_DIR, "orders.csv"))
+inventory_df   = pd.read_csv(os.path.join(DATA_DIR, "inventory_items.csv"))
 
-# ✅ Map column names to consistent variables
-# products.csv -> id, name
 products_df = products_df.rename(columns={"id": "product_id", "name": "product_name"})
-
-# order_items.csv -> product_id, sale_price
-# inventory_items.csv -> product_id, product_name, quantity (not directly present, will count unsold items if needed)
 
 sessions = {}
 session_counter = 1
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+def ask_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        return "LLM key not configured."
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "mixtral-8x7b-32768",
+        "messages": [{"role": "system", "content": "You are an e-commerce assistant."},
+                     {"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
+    resp = requests.post(GROQ_API_URL, json=payload, headers=headers)
+    if resp.status_code == 200:
+        return resp.json()["choices"][0]["message"]["content"]
+    return f"LLM error ({resp.status_code}): {resp.text}"
 
 @app.route("/sessions", methods=["POST"])
 def create_session():
     global session_counter
-    data = request.json
-    user_id = data.get("user_id", None)
-
-    session_id = session_counter
-    sessions[session_id] = {"user_id": user_id, "messages": []}
+    user_id = request.json.get("user_id")
+    sid = session_counter
+    sessions[sid] = {"user_id": user_id, "messages": []}
     session_counter += 1
-
-    return jsonify({"session_id": session_id}), 201
-
+    return jsonify({"session_id": sid}), 201
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
-    session_id = data.get("session_id")
-    user_message = data.get("message", "").lower()
+    data = request.get_json()
+    sid  = data.get("session_id")
+    msg  = data.get("message", "")
 
-    if session_id not in sessions:
+    if sid not in sessions:
         return jsonify({"response": "Invalid session ID"}), 400
 
-    response_text = "Sorry, I don't understand your question."
+    text = msg.lower()
+    response = "Sorry, I don't understand your question."
 
-    # ✅ 1. Top 5 most sold products
-    if "top" in user_message and "sold" in user_message:
-        top_products = (
-            order_items_df.groupby("product_id")["id"]  # "id" in order_items is unique per item sold
-            .count()
-            .sort_values(ascending=False)
-            .head(5)
-        )
+    if "top" in text and "sold" in text:
+        top5 = (order_items_df
+                .groupby("product_id")["id"]
+                .count()
+                .sort_values(ascending=False)
+                .head(5))
+        lines = []
+        for pid, cnt in top5.items():
+            name = products_df.loc[products_df["product_id"] == pid, "product_name"].iloc[0]
+            lines.append(f"{name}: {cnt}")
+        response = "Top 5 most sold products:\n" + "\n".join(lines)
 
-        result = []
-        for pid in top_products.index:
-            product_name = products_df.loc[
-                products_df["product_id"] == pid, "product_name"
-            ].values[0]
-            result.append(f"{product_name} ({top_products[pid]} sold)")
-        response_text = "Top 5 most sold products:\n" + "\n".join(result)
+    elif "status of order id" in text or "order status" in text:
+        m = re.search(r"order\s+id\s+(\d+)", text)
+        if m:
+            oid = int(m.group(1))
+            row = orders_df.loc[orders_df["order_id"] == oid]
+            if not row.empty:
+                status = row.iloc[0]["status"]
+                response = f"Order {oid} is currently '{status}'."
+            else:
+                response = f"No order found with ID {oid}."
+        else:
+            response = "Please specify a valid order ID, e.g. 12345."
 
-    # ✅ 2. Stock check for a specific product
-    elif "stock" in user_message or "left" in user_message:
+    elif "stock" in text or "left" in text:
         found = False
-        for _, row in products_df.iterrows():
-            if row["product_name"].lower() in user_message:
-                pid = row["product_id"]
-                # Count available items in inventory (not sold yet)
-                stock_left = inventory_df[
-                    (inventory_df["product_id"] == pid) & (inventory_df["sold_at"].isna())
+        for _, prod in products_df.iterrows():
+            pname = prod["product_name"].lower()
+            if pname in text:
+                pid = prod["product_id"]
+                left = inventory_df[
+                    (inventory_df["product_id"] == pid) &
+                    (inventory_df["sold_at"].isna())
                 ].shape[0]
-                response_text = (
-                    f"{row['product_name']} has {stock_left} items left in stock."
-                )
+                response = f"{prod['product_name']} has {left} items left in stock."
                 found = True
                 break
         if not found:
-            response_text = "Sorry, I couldn't find that product in stock."
+            response = "Sorry, I couldn't find that product in stock."
 
-    # ✅ Save conversation
-    sessions[session_id]["messages"].append({"user": user_message, "bot": response_text})
+    else:
+        response = ask_groq(msg)
 
-    return jsonify({"response": response_text})
-
+    sessions[sid]["messages"].append({"user": msg, "bot": response})
+    return jsonify({"response": response})
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
