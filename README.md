@@ -64,7 +64,7 @@ ecommerce-chatbot/
 
 1. **Clone the repo**  
    ```bash
-   git clone https://github.com/YourUsername/ecommerce-chatbot.git
+   git clone https://github.com/Itsabhi0104/Thinkforward123.git
    cd ecommerce-chatbot
    ```
 
@@ -85,7 +85,7 @@ ecommerce-chatbot/
 4. **Configure environment**  
    Create a `.env` file in project root:  
    ```env
-   GROQ_API_KEY=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
+   GROQ_API_KEY=YOUR_API_KEY
    ```
 
 5. **Load CSV data**  
